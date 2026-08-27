@@ -10,41 +10,87 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch and inspect pages
+      - name: Find a populated schedule and inspect its HTML
         shell: bash
         run: |
           set -euo pipefail
-          UA='RSREU-Schedule-App/0.1 (compatibility check)'
-          BASE='https://rasp.rsreu.ru/schedule-frame/group'
-
-          curl --fail --silent --show-error --location \
-            --connect-timeout 10 --max-time 30 -A "$UA" \
-            "$BASE?faculty=1&group=1421" -o group.html
-
-          echo '=== AVAILABLE WEEK VALUES ==='
           python3 - <<'PY'
-          import html, re
-          text = open('group.html', encoding='utf-8').read()
-          match = re.search(r'<select\s+name="date"[^>]*>(.*?)</select>', text, re.S | re.I)
-          print(html.unescape(match.group(1)) if match else 'date select not found')
-          PY
+          import html
+          import re
+          import time
+          import urllib.parse
+          import urllib.request
 
-          for DATE in 2026-08-24 2026-08-31 2026-09-07; do
-            curl --fail --silent --show-error --location \
-              --connect-timeout 10 --max-time 30 -A "$UA" \
-              "$BASE?faculty=1&group=1421&date=$DATE" -o "schedule-$DATE.html"
-          done
+          base = 'https://rasp.rsreu.ru/schedule-frame/group'
+          candidates = [
+              (2206, '610'), (2208, '611'), (2210, '612'), (2211, '614'),
+              (2212, '615'), (2213, '616'), (2214, '617'), (2215, '618'),
+              (2217, '619'), (1845, '620'), (1846, '621'), (1850, '622'),
+              (1852, '623'), (1853, '624'), (1854, '625'), (1855, '627'),
+              (2134, '630'), (2135, '631'), (2137, '632'), (2139, '633'),
+              (2244, '635'), (2141, '636'), (2142, '637'), (2144, '638'),
+              (2245, '640'), (2247, '641'), (2252, '642'), (2257, '644'),
+              (2258, '645'), (2260, '646'), (1432, '510'), (1431, '511'),
+              (1430, '512'), (1433, '514'), (1462, '520'), (1466, '522'),
+              (1468, '523'), (1469, '524'), (1470, '525')
+          ]
 
-          echo '=== TABLE/MESSAGE EXCERPTS ==='
-          python3 - <<'PY'
-          import html, re
-          for date in ('2026-08-24', '2026-08-31', '2026-09-07'):
-              text = open(f'schedule-{date}.html', encoding='utf-8').read()
-              tables = re.findall(r'<table\b.*?</table>', text, re.S | re.I)
-              selected = [t for t in tables if 'table-vertical-borders' in t or 'table-message' in t]
-              print(f'--- {date} ---')
-              for table in selected:
-                  cleaned = re.sub(r'>\s+<', '><', table)
-                  cleaned = html.unescape(cleaned)
-                  print(cleaned[:16000])
+          def text_content(fragment: str) -> str:
+              fragment = re.sub(r'<script\b.*?</script>', ' ', fragment, flags=re.S | re.I)
+              fragment = re.sub(r'<style\b.*?</style>', ' ', fragment, flags=re.S | re.I)
+              fragment = re.sub(r'<[^>]+>', ' ', fragment)
+              return re.sub(r'\s+', ' ', html.unescape(fragment)).strip()
+
+          found = False
+          for faculty in (1, 2, 3, 4, 5, 10, 11):
+              for group_id, label in candidates:
+                  params = urllib.parse.urlencode({
+                      'faculty': faculty,
+                      'group': group_id,
+                      'date': '2026-08-31',
+                  })
+                  request = urllib.request.Request(
+                      f'{base}?{params}',
+                      headers={'User-Agent': 'RSREU-Schedule-App/0.1 (compatibility check)'},
+                  )
+                  try:
+                      with urllib.request.urlopen(request, timeout=20) as response:
+                          page = response.read().decode('utf-8', errors='replace')
+                  except Exception as exc:
+                      print(f'ERROR faculty={faculty} group={label}: {exc}')
+                      continue
+
+                  match = re.search(
+                      r'<table\b[^>]*table-vertical-borders[^>]*>.*?</table>',
+                      page,
+                      flags=re.S | re.I,
+                  )
+                  if not match:
+                      continue
+
+                  table = match.group(0)
+                  rows = re.findall(r'<tr\b.*?</tr>', table, flags=re.S | re.I)
+                  populated = []
+                  for row_index, row in enumerate(rows[1:], start=1):
+                      cells = re.findall(r'<td\b.*?</td>', row, flags=re.S | re.I)
+                      for day_index, cell in enumerate(cells[1:], start=1):
+                          value = text_content(cell)
+                          if value:
+                              populated.append((row_index, day_index, value))
+
+                  if populated:
+                      print(f'FOUND faculty={faculty} group={label} id={group_id}')
+                      print('POPULATED CELLS:')
+                      for item in populated[:20]:
+                          print(item)
+                      print('TABLE HTML:')
+                      print(re.sub(r'>\s+<', '><', html.unescape(table))[:30000])
+                      found = True
+                      break
+                  time.sleep(0.15)
+              if found:
+                  break
+
+          if not found:
+              print('No populated schedule found in the candidate set.')
           PY
