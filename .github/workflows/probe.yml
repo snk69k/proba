@@ -1,4 +1,4 @@
-name: Probe RSREU schedule
+name: Probe RSREU lecturer schedule
 
 on:
   push:
@@ -10,87 +10,41 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Find a populated schedule and inspect its HTML
+      - name: Inspect lecturer schedule HTML
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import html
           import re
-          import time
           import urllib.parse
           import urllib.request
 
-          base = 'https://rasp.rsreu.ru/schedule-frame/group'
-          candidates = [
-              (2206, '610'), (2208, '611'), (2210, '612'), (2211, '614'),
-              (2212, '615'), (2213, '616'), (2214, '617'), (2215, '618'),
-              (2217, '619'), (1845, '620'), (1846, '621'), (1850, '622'),
-              (1852, '623'), (1853, '624'), (1854, '625'), (1855, '627'),
-              (2134, '630'), (2135, '631'), (2137, '632'), (2139, '633'),
-              (2244, '635'), (2141, '636'), (2142, '637'), (2144, '638'),
-              (2245, '640'), (2247, '641'), (2252, '642'), (2257, '644'),
-              (2258, '645'), (2260, '646'), (1432, '510'), (1431, '511'),
-              (1430, '512'), (1433, '514'), (1462, '520'), (1466, '522'),
-              (1468, '523'), (1469, '524'), (1470, '525')
-          ]
+          base = 'https://rasp.rsreu.ru/schedule-frame/lecturer'
+          params = urllib.parse.urlencode({
+              'faculty': 1,
+              'lecturer': 21,
+              'date': '2026-08-31',
+          })
+          request = urllib.request.Request(
+              f'{base}?{params}',
+              headers={'User-Agent': 'RSREU-Schedule-Android/0.2 (compatibility check)'},
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              page = response.read().decode('utf-8', errors='replace')
+              print('STATUS', response.status)
+              print('CONTENT-TYPE', response.headers.get('Content-Type'))
 
-          def text_content(fragment: str) -> str:
-              fragment = re.sub(r'<script\b.*?</script>', ' ', fragment, flags=re.S | re.I)
-              fragment = re.sub(r'<style\b.*?</style>', ' ', fragment, flags=re.S | re.I)
-              fragment = re.sub(r'<[^>]+>', ' ', fragment)
-              return re.sub(r'\s+', ' ', html.unescape(fragment)).strip()
+          match = re.search(
+              r'<table\b[^>]*table-vertical-borders[^>]*>.*?</table>',
+              page,
+              flags=re.S | re.I,
+          )
+          if not match:
+              print(page[:30000])
+              raise SystemExit('Schedule table not found')
 
-          found = False
-          for faculty in (1, 2, 3, 4, 5, 10, 11):
-              for group_id, label in candidates:
-                  params = urllib.parse.urlencode({
-                      'faculty': faculty,
-                      'group': group_id,
-                      'date': '2026-08-31',
-                  })
-                  request = urllib.request.Request(
-                      f'{base}?{params}',
-                      headers={'User-Agent': 'RSREU-Schedule-App/0.1 (compatibility check)'},
-                  )
-                  try:
-                      with urllib.request.urlopen(request, timeout=20) as response:
-                          page = response.read().decode('utf-8', errors='replace')
-                  except Exception as exc:
-                      print(f'ERROR faculty={faculty} group={label}: {exc}')
-                      continue
-
-                  match = re.search(
-                      r'<table\b[^>]*table-vertical-borders[^>]*>.*?</table>',
-                      page,
-                      flags=re.S | re.I,
-                  )
-                  if not match:
-                      continue
-
-                  table = match.group(0)
-                  rows = re.findall(r'<tr\b.*?</tr>', table, flags=re.S | re.I)
-                  populated = []
-                  for row_index, row in enumerate(rows[1:], start=1):
-                      cells = re.findall(r'<td\b.*?</td>', row, flags=re.S | re.I)
-                      for day_index, cell in enumerate(cells[1:], start=1):
-                          value = text_content(cell)
-                          if value:
-                              populated.append((row_index, day_index, value))
-
-                  if populated:
-                      print(f'FOUND faculty={faculty} group={label} id={group_id}')
-                      print('POPULATED CELLS:')
-                      for item in populated[:20]:
-                          print(item)
-                      print('TABLE HTML:')
-                      print(re.sub(r'>\s+<', '><', html.unescape(table))[:30000])
-                      found = True
-                      break
-                  time.sleep(0.15)
-              if found:
-                  break
-
-          if not found:
-              print('No populated schedule found in the candidate set.')
+          table = re.sub(r'>\s+<', '><', html.unescape(match.group(0)))
+          print('TABLE HTML:')
+          print(table[:30000])
           PY
