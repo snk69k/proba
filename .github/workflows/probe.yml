@@ -10,18 +10,41 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch page
+      - name: Fetch and inspect pages
         shell: bash
         run: |
           set -euo pipefail
+          UA='RSREU-Schedule-App/0.1 (compatibility check)'
+          BASE='https://rasp.rsreu.ru/schedule-frame/group'
+
           curl --fail --silent --show-error --location \
-            --connect-timeout 10 --max-time 30 \
-            -A 'RSREU-Schedule-App/0.1 (compatibility check)' \
-            -D headers.txt \
-            'https://rasp.rsreu.ru/schedule-frame/group' \
-            -o page.html
-          echo '=== HEADERS ==='
-          cat headers.txt
-          echo '=== HTML START ==='
-          sed -n '1,260p' page.html
-          echo '=== HTML END ==='
+            --connect-timeout 10 --max-time 30 -A "$UA" \
+            "$BASE?faculty=1&group=1421" -o group.html
+
+          echo '=== AVAILABLE WEEK VALUES ==='
+          python3 - <<'PY'
+          import html, re
+          text = open('group.html', encoding='utf-8').read()
+          match = re.search(r'<select\s+name="date"[^>]*>(.*?)</select>', text, re.S | re.I)
+          print(html.unescape(match.group(1)) if match else 'date select not found')
+          PY
+
+          for DATE in 2026-08-24 2026-08-31 2026-09-07; do
+            curl --fail --silent --show-error --location \
+              --connect-timeout 10 --max-time 30 -A "$UA" \
+              "$BASE?faculty=1&group=1421&date=$DATE" -o "schedule-$DATE.html"
+          done
+
+          echo '=== TABLE/MESSAGE EXCERPTS ==='
+          python3 - <<'PY'
+          import html, re
+          for date in ('2026-08-24', '2026-08-31', '2026-09-07'):
+              text = open(f'schedule-{date}.html', encoding='utf-8').read()
+              tables = re.findall(r'<table\b.*?</table>', text, re.S | re.I)
+              selected = [t for t in tables if 'table-vertical-borders' in t or 'table-message' in t]
+              print(f'--- {date} ---')
+              for table in selected:
+                  cleaned = re.sub(r'>\s+<', '><', table)
+                  cleaned = html.unescape(cleaned)
+                  print(cleaned[:16000])
+          PY
