@@ -1,0 +1,27 @@
+name: Probe RSREU schedule
+
+on:
+  push:
+    paths:
+      - '.github/workflows/probe.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch page
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 30 \
+            -A 'RSREU-Schedule-App/0.1 (compatibility check)' \
+            -D headers.txt \
+            'https://rasp.rsreu.ru/schedule-frame/group' \
+            -o page.html
+          echo '=== HEADERS ==='
+          cat headers.txt
+          echo '=== HTML START ==='
+          sed -n '1,260p' page.html
+          echo '=== HTML END ==='
