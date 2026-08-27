@@ -16,22 +16,33 @@ concurrency:
 jobs:
   verify-and-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Restore and verify Android project sources
+      - name: Restore baseline and apply v0.2.0 changes
         shell: bash
         run: |
+          set -euo pipefail
+
           cat ci/bundle.part* > /tmp/rsreu_schedule_bundle.b64
           base64 --decode /tmp/rsreu_schedule_bundle.b64 > /tmp/rsreu_schedule_source.tar.gz
           echo "bb7da102a613aca88c62b6ec8c72a9c09fdc08c2331ab4ce93012d0cf165bc47  /tmp/rsreu_schedule_source.tar.gz" \
             | sha256sum --check --strict
           tar --extract --gzip --file /tmp/rsreu_schedule_source.tar.gz
+
+          base64 --decode ci/update-v0.2.0.patch.gz.b64 > /tmp/rsreu-v0.2.patch.gz
+          echo "78d89eeb4581607dacfb700058ddad97caa0fde775a12cb1e92afc6d918510d2  /tmp/rsreu-v0.2.patch.gz" \
+            | sha256sum --check --strict
+          gzip --decompress --stdout /tmp/rsreu-v0.2.patch.gz \
+            | patch --batch --strip=1
+
           test -f app/src/main/java/ru/rsreu/schedule/MainActivity.kt
           test -f app/src/test/java/ru/rsreu/schedule/data/ScheduleParserTest.kt
+          grep --quiet 'versionName = "0.2.0-test"' app/build.gradle.kts
+          grep --quiet 'loadLecturerSchedule' app/src/main/java/ru/rsreu/schedule/data/ScheduleRepository.kt
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -53,9 +64,10 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Verify live RSREU source structure
+      - name: Verify live group and lecturer sources
         shell: bash
         run: |
+          set -euo pipefail
           python3 - <<'PY'
           import html
           import re
@@ -63,39 +75,91 @@ jobs:
           import urllib.parse
           import urllib.request
 
-          base = "https://rasp.rsreu.ru/schedule-frame/group"
-          headers = {"User-Agent": "RSREU-Schedule-Android/0.1 (CI compatibility test)"}
+          group_endpoint = "https://rasp.rsreu.ru/schedule-frame/group"
+          lecturer_endpoint = "https://rasp.rsreu.ru/schedule-frame/lecturer"
+          headers = {"User-Agent": "RSREU-Schedule-Android/0.2 (CI compatibility test)"}
 
-          def fetch(params):
-              url = base + "?" + urllib.parse.urlencode(params)
+          def fetch(endpoint, params):
+              url = endpoint + "?" + urllib.parse.urlencode(params)
               request = urllib.request.Request(url, headers=headers)
               with urllib.request.urlopen(request, timeout=20) as response:
                   assert response.status == 200
+                  assert "text/html" in (response.headers.get("Content-Type") or "")
                   return response.read().decode("utf-8", errors="replace")
 
-          group_page = fetch({"faculty": 1, "group": 2206})
+          group_page = fetch(group_endpoint, {"faculty": 1, "group": 2206})
           assert 'name="group"' in group_page
           assert ':options=' in group_page
           assert '"value":2206' in html.unescape(group_page)
 
-          select = re.search(r'<select\s+name="date"[^>]*>(.*?)</select>', group_page, re.S | re.I)
-          assert select, "Week selector not found"
-          weeks = re.findall(r'<option\s+value="(\d{4}-\d{2}-\d{2})"', select.group(1), re.I)
-          assert weeks, "No week values found"
+          group_select = re.search(
+              r'<select\s+name="date"[^>]*>(.*?)</select>',
+              group_page,
+              re.S | re.I,
+          )
+          assert group_select, "Group week selector not found"
+          weeks = re.findall(
+              r'<option\s+value="(\d{4}-\d{2}-\d{2})"',
+              group_select.group(1),
+              re.I,
+          )
+          assert weeks, "No group week values found"
 
-          found_table = False
-          found_lesson = False
+          populated_group_page = None
+          chosen_week = None
+          lecturer_id = None
           for week in weeks:
-              page = fetch({"faculty": 1, "group": 2206, "date": week})
-              found_table = found_table or "table-vertical-borders" in page
-              found_lesson = found_lesson or "schedule-cell" in page
-              if found_table and found_lesson:
-                  print(f"Compatible populated schedule found for week {week}")
+              candidate = fetch(
+                  group_endpoint,
+                  {"faculty": 1, "group": 2206, "date": week},
+              )
+              match = re.search(
+                  r'/schedule-frame/lecturer\?lecturer=(\d+)&(?:amp;)?date=',
+                  candidate,
+                  re.I,
+              )
+              if "table-vertical-borders" in candidate and "schedule-cell" in candidate and match:
+                  populated_group_page = candidate
+                  chosen_week = week
+                  lecturer_id = int(match.group(1))
                   break
               time.sleep(0.2)
 
-          assert found_table, "Schedule table marker not found"
-          assert found_lesson, "No populated lesson cell found in available weeks"
+          assert populated_group_page, "No populated group schedule found"
+          assert chosen_week and lecturer_id
+          assert re.search(r'>\s*(?:доц\.|проф\.|ст\.\s*преп\.)', populated_group_page, re.I)
+
+          lecturer_page = fetch(
+              lecturer_endpoint,
+              {"faculty": 1, "lecturer": lecturer_id},
+          )
+          lecturer_select = re.search(
+              r'<select\s+name="date"[^>]*>(.*?)</select>',
+              lecturer_page,
+              re.S | re.I,
+          )
+          assert lecturer_select, "Lecturer week selector not found"
+
+          lecturer_schedule = fetch(
+              lecturer_endpoint,
+              {
+                  "faculty": 1,
+                  "lecturer": lecturer_id,
+                  "date": chosen_week,
+              },
+          )
+          assert "table-vertical-borders" in lecturer_schedule
+          assert "schedule-cell" in lecturer_schedule
+          assert re.search(
+              r'/schedule-frame/group\?group=\d+&(?:amp;)?date=',
+              lecturer_schedule,
+              re.I,
+          ), "Lecturer schedule group links not found"
+
+          print(
+              f"Compatible group and lecturer schedules found for week {chosen_week}; "
+              f"lecturer={lecturer_id}"
+          )
           PY
 
       - name: Unit tests, lint and APK build
@@ -120,22 +184,25 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: gradle --no-daemon connectedDebugAndroidTest --stacktrace
 
-      - name: Prepare distributable APK
+      - name: Prepare distributable APK and source
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p dist
           cp app/build/outputs/apk/debug/app-debug.apk \
-            dist/RSREU-Schedule-v0.1.0-test.apk
-          cp /tmp/rsreu_schedule_source.tar.gz \
-            dist/RSREU-Schedule-source-v0.1.0.tar.gz
+            dist/RSREU-Schedule-v0.2.0-test.apk
+          tar --create --gzip \
+            --file dist/RSREU-Schedule-source-v0.2.0.tar.gz \
+            app build.gradle.kts gradle.properties settings.gradle.kts \
+            README_APP.md TESTING.md
           cd dist
-          sha256sum RSREU-Schedule-v0.1.0-test.apk \
-            > RSREU-Schedule-v0.1.0-test.apk.sha256
+          sha256sum RSREU-Schedule-v0.2.0-test.apk \
+            > RSREU-Schedule-v0.2.0-test.apk.sha256
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: rsreu-schedule-apk
+          name: rsreu-schedule-apk-v0.2.0
           path: dist/*
           if-no-files-found: error
           retention-days: 30
@@ -144,7 +211,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: android-test-reports
+          name: android-test-reports-v0.2.0
           path: |
             app/build/reports/
             app/build/outputs/androidTest-results/
